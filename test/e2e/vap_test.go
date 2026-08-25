@@ -5,9 +5,10 @@ import (
 	"time"
 
 	"github.com/jcallen/testing-day2-vcenter/pkg/framework"
-	configv1 "github.com/openshift/api/config/v1"
+	"github.com/jcallen/testing-day2-vcenter/pkg/vsphere"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	configv1 "github.com/openshift/api/config/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -149,6 +150,124 @@ var _ = Describe("ValidatingAdmissionPolicies", Label("readonly", "admission", "
 				Skip("all failure domains are referenced by Machines, CPMS, or MachineSets")
 			}
 		})
+
+		// SPLAT-2826: the Machine and MachineSet failure-domain VAPs only
+		// compared labels against the *proposed* spec, so any Infrastructure
+		// update was denied when Machine/MachineSet region/zone labels matched
+		// no failure domain (e.g. vCenter tags out of sync with FD definitions).
+		// The fix (machine-api-operator PR #1536) adds an oldFds variable from
+		// oldObject and denies only removal of an FD that existed before. These
+		// dry-run tests keep a MachineSet whose labels match no FD and verify
+		// day-2 operations still succeed. They fail pre-fix on any cluster,
+		// because the synthetic labels make the mismatch condition hold by
+		// construction.
+		Context("SPLAT-2826: Machine labels matching no failure domain", Label("p1", "mutating", "multi-vcenter"), func() {
+			const (
+				bogusRegion = "splat2826-nowhere"
+				bogusZone   = "splat2826-nowhere-1a"
+				probeMS     = "e2e-vap-splat-2826"
+			)
+
+			BeforeEach(func() {
+				requireMultiVCenter()
+				infra := currentInfrastructure()
+				for _, fd := range framework.GetFailureDomains(infra) {
+					Expect(fd.Region).NotTo(Equal(bogusRegion),
+						"synthetic region %q collides with real failure domain %q", bogusRegion, fd.Name)
+					Expect(fd.Zone).NotTo(Equal(bogusZone),
+						"synthetic zone %q collides with real failure domain %q", bogusZone, fd.Name)
+				}
+
+				sets := listMachineSets()
+				if len(sets) == 0 {
+					Skip("no existing MachineSets to clone providerSpec from")
+				}
+
+				_, err := clients.Machine.MachineV1beta1().MachineSets(framework.MachineAPINamespace).Get(suiteCtx, probeMS, metav1.GetOptions{})
+				if err == nil {
+					return // leftover probe from a previous run
+				}
+
+				// replicas=0: no VMs are ever created; the MachineSet VAP matches
+				// template labels, so the probe trips the VAP without provisioning.
+				ms := framework.CloneMachineSetForVAP(sets[0], probeMS, bogusRegion, bogusZone, 0)
+				created, err := framework.CreateMachineSet(suiteCtx, clients.Machine, ms)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(created.Name).To(Equal(probeMS))
+				DeferCleanup(func() {
+					_ = framework.DeleteMachineSet(suiteCtx, clients.Machine, probeMS)
+				})
+			})
+
+			It("should allow re-applying an unchanged Infrastructure spec via dry-run", func() {
+				infra := currentInfrastructure()
+				spec := vsphere.CloneInfrastructureSpec(infra.Spec)
+				expectPatchAllowedDryRun(&spec)
+			})
+
+			It("should allow adding a vCenter (no FD change) via dry-run", func() {
+				infra := currentInfrastructure()
+				if len(framework.GetVCenters(infra)) >= 3 {
+					Skip("cluster already has 3 vCenters")
+				}
+				expectPatchAllowedDryRun(addSecondVCenterSpec(infra))
+			})
+
+			It("should allow removing an unreferenced failure domain via dry-run", func() {
+				infra := currentInfrastructure()
+				fds := framework.GetFailureDomains(infra)
+				if len(fds) == 0 {
+					Skip("no failure domains configured")
+				}
+
+				// Build the set of FD region/zone pairs that are legitimately
+				// in use (the probe MachineSet references none by construction).
+				referenced := map[string]bool{}
+				for _, m := range listMachines() {
+					if r, z, ok := machineLabeledFailureDomain(m); ok {
+						referenced[r+"/"+z] = true
+					}
+				}
+				for _, s := range listMachineSets() {
+					if s.Name == probeMS || s.Spec.Template.Labels == nil {
+						continue
+					}
+					r, z := s.Spec.Template.Labels[framework.MachineRegionLabel], s.Spec.Template.Labels[framework.MachineZoneLabel]
+					if r != "" && z != "" {
+						referenced[r+"/"+z] = true
+					}
+				}
+				fdByName := map[string]configv1.VSpherePlatformFailureDomainSpec{}
+				for _, fd := range fds {
+					fdByName[fd.Name] = fd
+				}
+				for _, cpms := range listCPMS() {
+					for _, name := range framework.CPMSVSphereFailureDomainNames(&cpms) {
+						if fd, ok := fdByName[name]; ok {
+							referenced[fd.Region+"/"+fd.Zone] = true
+						}
+					}
+				}
+
+				var candidate *configv1.VSpherePlatformFailureDomainSpec
+				for i := range fds {
+					if !referenced[fds[i].Region+"/"+fds[i].Zone] {
+						candidate = &fds[i]
+						GinkgoWriter.Printf("FD %q (region=%s zone=%s) is unreferenced\n", fds[i].Name, fds[i].Region, fds[i].Zone)
+						break
+					}
+				}
+				if candidate == nil {
+					Skip("all failure domains are referenced by Machines, CPMS, or MachineSets")
+				}
+
+				spec := specWithoutFailureDomain(infra, candidate.Region, candidate.Zone)
+				_, err := patchInfrastructureSpec(spec, true)
+				Expect(err).NotTo(HaveOccurred(),
+					"removing unreferenced FD %q should be allowed even though Machine labels match no FD (SPLAT-2826): %s",
+					candidate.Name, framework.InfrastructurePatchError(err))
+			})
+		})
 	})
 
 	Context("when VSphereMultiVCenterDay2 is disabled", func() {
@@ -161,4 +280,3 @@ var _ = Describe("ValidatingAdmissionPolicies", Label("readonly", "admission", "
 		})
 	})
 })
-
