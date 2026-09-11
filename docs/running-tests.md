@@ -136,6 +136,18 @@ Results are written to `PERF_RESULTS_DIR` (default `reports/`) as `perf-results.
 
 This installs two clusters serially, runs the benchmark on each, and produces a comparison report via `go run ./cmd/perf-compare`.
 
+### Scale Ladder Benchmark
+
+`make test-perf-scale` scales an existing worker MachineSet cumulatively from 50 to 300 workers in 50-worker increments. Each step waits for all target Machines and Nodes to be Ready, then writes `step-*.json` with timing, Machine API logs, and namespace events.
+
+```bash
+KUBECONFIG=/path/to/auth/kubeconfig \
+PERF_SCALE_RESULTS_DIR=/tmp/scale-results \
+make test-perf-scale
+```
+
+Overrides: `PERF_SCALE_START` (50), `PERF_SCALE_STOP` (300), `PERF_SCALE_STEP` (50), and `PERF_SCALE_TIMEOUT` (90m). The benchmark returns the MachineSet to its initial replica count during cleanup.
+
 ### Real vCenter Tests
 
 Require `config/lab.yaml` (or `E2E_LAB_CONFIG` env var) pointing to a valid lab config with a real second vCenter that has already been applied to the cluster via `make apply-lab`.

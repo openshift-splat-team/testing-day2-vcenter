@@ -1,4 +1,4 @@
-.PHONY: vet build test-dry-run test-readonly test-p0 test-mutating test-storage test-storage-readonly test-csi-operator test-csi-topology test-csi-orphan test-real test-perf test-e2e apply-lab restore-lab verify-lab aggregate-junit
+.PHONY: vet build test-dry-run test-readonly test-p0 test-mutating test-storage test-storage-readonly test-csi-operator test-csi-topology test-csi-orphan test-real test-perf test-perf-scale test-e2e apply-lab restore-lab verify-lab aggregate-junit
 
 GINKGO ?= $(shell go env GOPATH)/bin/ginkgo
 GINKGO_FLAGS ?= -v
@@ -75,6 +75,10 @@ test-csi-orphan:
 test-perf:
 	@mkdir -p $(REPORT_DIR)
 	RUN_E2E=1 $(GINKGO) $(GINKGO_FLAGS) --timeout=90m $(GINKGO_REPORT)=perf.xml --label-filter="perf" ./test/e2e/
+
+test-perf-scale:
+	@mkdir -p $(REPORT_DIR)
+	RUN_E2E=1 $(GINKGO) $(GINKGO_FLAGS) --timeout=6h $(GINKGO_REPORT)=perf-scale.xml --label-filter="perf-scale" ./test/e2e/
 
 test-real:
 	@mkdir -p $(REPORT_DIR)
