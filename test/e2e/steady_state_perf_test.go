@@ -371,19 +371,22 @@ func watchNewMachinePhases(ctx SpecContext, expect int) ([]framework.SteadyMachi
 			return false, nil
 		}
 		now := time.Now()
-		running := 0
 		for _, m := range machines.Items {
-			if m.DeletionTimestamp != nil || steadySeenMacs[m.Name] {
+			if m.DeletionTimestamp != nil {
 				continue
 			}
-			steadySeenMacs[m.Name] = true
-			rec, ok := recs[m.Name]
-			if !ok {
-				rec = &framework.SteadyMachineTiming{MachineTimingRecord: framework.MachineTimingRecord{
+			// First sight = this step's machine: track it from now on. Machines
+			// seen by earlier steps (or the floor) stay outside recs.
+			if !steadySeenMacs[m.Name] {
+				steadySeenMacs[m.Name] = true
+				recs[m.Name] = &framework.SteadyMachineTiming{MachineTimingRecord: framework.MachineTimingRecord{
 					Name:    m.Name,
 					Created: m.CreationTimestamp.Time,
 				}}
-				recs[m.Name] = rec
+			}
+			rec, tracked := recs[m.Name]
+			if !tracked {
+				continue
 			}
 			phase := ""
 			if m.Status.Phase != nil {
@@ -411,6 +414,13 @@ func watchNewMachinePhases(ctx SpecContext, expect int) ([]framework.SteadyMachi
 				if rec.Running.IsZero() {
 					rec.Running = now
 				}
+			}
+		}
+		// Count from the records, not the poll: a machine Running on a later
+		// poll must still count (seenMacs must not exclude it from the count).
+		running := 0
+		for _, r := range recs {
+			if !r.Running.IsZero() {
 				running++
 			}
 		}
