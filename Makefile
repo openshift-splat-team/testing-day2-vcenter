@@ -1,4 +1,4 @@
-.PHONY: vet build test-dry-run test-readonly test-p0 test-mutating test-storage test-storage-readonly test-csi-operator test-csi-topology test-csi-orphan test-real test-perf test-e2e apply-lab restore-lab verify-lab aggregate-junit
+.PHONY: vet build test-dry-run test-readonly test-p0 test-mutating test-storage test-storage-readonly test-csi-operator test-csi-topology test-csi-orphan test-real test-perf test-perf-steady test-e2e apply-lab restore-lab verify-lab aggregate-junit
 
 GINKGO ?= $(shell go env GOPATH)/bin/ginkgo
 GINKGO_FLAGS ?= -v
@@ -41,7 +41,7 @@ test-p0:
 
 test-mutating:
 	@mkdir -p $(REPORT_DIR)
-	RUN_E2E=1 E2E_LAB_CONFIG=$(abspath $(CONFIG)) $(GINKGO) $(GINKGO_FLAGS) $(GINKGO_REPORT)=mutating.xml --label-filter="mutating && !perf" ./test/e2e/
+	RUN_E2E=1 E2E_LAB_CONFIG=$(abspath $(CONFIG)) $(GINKGO) $(GINKGO_FLAGS) $(GINKGO_REPORT)=mutating.xml --label-filter="mutating && !perf && !perf-steady" ./test/e2e/
 
 test-storage:
 	@mkdir -p $(REPORT_DIR)
@@ -75,6 +75,13 @@ test-csi-orphan:
 test-perf:
 	@mkdir -p $(REPORT_DIR)
 	RUN_E2E=1 $(GINKGO) $(GINKGO_FLAGS) --timeout=90m $(GINKGO_REPORT)=perf.xml --label-filter="perf" ./test/e2e/
+
+# Steady-state provisioning benchmark: drain -> ramp 0->target -> +1..+5 increments.
+# Long-running (hours); drains the cluster and restores worker MachineSets after.
+# Knobs: PERF_SS_TARGET, PERF_SS_RAMP_BATCH, PERF_SS_INCREMENTS, PERF_SS_RESULTS_DIR
+test-perf-steady:
+	@mkdir -p $(REPORT_DIR)
+	RUN_E2E=1 $(GINKGO) $(GINKGO_FLAGS) --timeout=12h $(GINKGO_REPORT)=perf-steady.xml --label-filter="perf-steady" ./test/e2e/
 
 test-real:
 	@mkdir -p $(REPORT_DIR)
