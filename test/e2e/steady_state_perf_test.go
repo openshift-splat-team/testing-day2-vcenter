@@ -134,6 +134,12 @@ var _ = Describe("Steady-state provisioning benchmark", Ordered, Label("perf-ste
 					"floor machines of %s must be Running", s.Name)
 			}
 		}
+		// The ramp set must converge down to its floor machines before the ramp:
+		// leftover Deleting machines otherwise pollute step 1's node-Ready gate
+		// (and stuck deletions would fail the run mid-ramp without a fallback).
+		if originals[rampMS] > floor {
+			Expect(drainTo(ctx, rampMS, floor)).To(Succeed(), "ramp machineset %s must drain to floor", rampMS)
+		}
 		for _, s := range workerSets {
 			if s.Name == rampMS || originals[s.Name] == 0 {
 				continue // ramp set keeps its floor machines
@@ -269,6 +275,38 @@ func waitMachineSetRunning(ctx SpecContext, msName string, expect int, timeout t
 		GinkgoWriter.Printf("floor-wait: %d/%d machines Running for %s\n", running, expect, msName)
 		return running >= expect, nil
 	})
+}
+
+// drainTo waits until msName has at most `keep` machines, force-deleting
+// stragglers if the first wait times out (MAO recreates the floor replicas).
+func drainTo(ctx SpecContext, msName string, keep int) error {
+	waitForKeep := func(timeout time.Duration) error {
+		lastLog := time.Now()
+		return wait.PollUntilContextTimeout(ctx, 15*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+			machines, err := clients.Machine.MachineV1beta1().Machines(framework.MachineAPINamespace).List(ctx, metav1.ListOptions{
+				LabelSelector: "machine.openshift.io/cluster-api-machineset=" + msName,
+			})
+			if err != nil {
+				return false, nil
+			}
+			if len(machines.Items) <= keep {
+				return true, nil
+			}
+			if time.Since(lastLog) >= 30*time.Second {
+				fmt.Printf("  drain-wait: %d machine(s) remaining for %s (target <= %d)\n", len(machines.Items), msName, keep)
+				lastLog = time.Now()
+			}
+			return false, nil
+		})
+	}
+	if err := waitForKeep(perfSSDrainTimeout); err != nil {
+		GinkgoWriter.Printf("drain of %s to %d timed out, force-deleting machines\n", msName, keep)
+		framework.ForceDeleteMachineSetMachines(ctx, clients.Machine, msName)
+		if err2 := waitForKeep(perfSSDrainTimeout); err2 != nil {
+			return fmt.Errorf("drain of %s to %d: %w (retry: %v)", msName, keep, err, err2)
+		}
+	}
+	return nil
 }
 
 // drainMachineSet waits for a MachineSet to drain, force-deleting machines
