@@ -109,7 +109,7 @@ test-e2e:
 		echo "=== Phase 3: readonly (multi-vCenter) ==="; \
 		RUN_E2E=1 $(GINKGO) $(GINKGO_FLAGS) $(GINKGO_REPORT)=phase3-readonly.xml --label-filter="readonly" ./test/e2e/ || rc=$$?; \
 		echo "=== Phase 4: mutating ==="; \
-		RUN_E2E=1 E2E_LAB_CONFIG=$(abspath $(CONFIG)) $(GINKGO) $(GINKGO_FLAGS) $(GINKGO_REPORT)=phase4-mutating.xml --label-filter="mutating && !perf" ./test/e2e/ || rc=$$?; \
+		RUN_E2E=1 E2E_LAB_CONFIG=$(abspath $(CONFIG)) $(GINKGO) $(GINKGO_FLAGS) $(GINKGO_REPORT)=phase4-mutating.xml --label-filter="mutating && !perf && !perf-steady" ./test/e2e/ || rc=$$?; \
 		echo "=== Phase 5: storage ==="; \
 		RUN_E2E=1 E2E_LAB_CONFIG=$(abspath $(CONFIG)) $(GINKGO) $(GINKGO_FLAGS) --timeout=45m $(GINKGO_REPORT)=phase5-storage.xml --label-filter="storage" ./test/e2e/ || rc=$$?; \
 	fi; \
