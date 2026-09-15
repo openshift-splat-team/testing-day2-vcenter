@@ -35,9 +35,9 @@ Perf tests are excluded from `test-mutating` and `test-e2e` via label filters (`
 | Target | Variables |
 |---|---|
 | `test-perf` | `PERF_WORKER_COUNT` (default 300), `PERF_STEADY_STATE_SECONDS` (default 60), `PERF_RESULTS_DIR` |
-| `test-perf-steady` | `PERF_SS_TARGET` (default 350, total cluster size), `PERF_SS_RAMP_BATCH` (default 10), `PERF_SS_INCREMENTS` (default "1,2,3,4,5"), `PERF_SS_RESULTS_DIR` (default `reports`) |
+| `test-perf-steady` | `PERF_SS_TARGET` (default 350, total cluster size), `PERF_SS_FLOOR` (default 2, workers kept after drain), `PERF_SS_RAMP_BATCH` (default 10), `PERF_SS_INCREMENTS` (default "1,2,3,4,5"), `PERF_SS_RESULTS_DIR` (default `reports`) |
 
-The steady-state test drains all worker MachineSets to 0 first (restores them in AfterAll), ramps the real `*-worker-0` MachineSet to target in batches with full convergence (every new machine Running AND every node Ready) before each batch, then runs single-round increments at steady state. It writes `steady-state-results.json` (per-machine 5-timestamp chain: machine created/provisioning/provisioned, node created/ready) plus MAO/MCS/MCD pod logs to `<PERF_SS_RESULTS_DIR>/logs/`.
+The steady-state test drains the worker MachineSets to `PERF_SS_FLOOR` first (ramp set keeps the floor so MCS/MCD, monitoring and ingress stay healthy; others go to 0; original replica counts restored in AfterAll), then ramps the real `*-worker-0` MachineSet from the floor to target in batches with full convergence (every new machine Running AND every node Ready) before each batch, then runs single-round increments at steady state. It writes `steady-state-results.json` (per-machine 5-timestamp chain: machine created/provisioning/provisioned, node created/ready) plus MAO/MCS/MCD pod logs to `<PERF_SS_RESULTS_DIR>/logs/`.
 
 ### Test Reports & Ginkgo Flags
 

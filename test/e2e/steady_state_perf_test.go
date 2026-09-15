@@ -5,8 +5,10 @@ package e2e
 // Mirrors the customer-reported scenario: a large cluster already at steady
 // state, scaled up in small increments. Phases:
 //
-//	P0  drain all worker MachineSets to 0 (also self-heals OVN-crashed nodes)
-//	P1  ramp 0 -> target in fixed-size batches, full convergence (every new
+//	P0  drain worker MachineSets to PERF_SS_FLOOR (default 2 on the ramp set,
+//	    0 elsewhere; a live worker pool keeps MCS/MCD, monitoring and ingress
+//	    healthy — also self-heals OVN-crashed nodes)
+//	P1  ramp floor -> target in fixed-size batches, full convergence (every new
 //	    machine Running AND every node Ready) before the next batch
 //	P2  single round of steady-state increments (+1, +2, +3, +4, +5)
 //	P3  capture MAO/MCS operator logs and write steady-state-results.json
@@ -55,6 +57,7 @@ var (
 var _ = Describe("Steady-state provisioning benchmark", Ordered, Label("perf-steady", "mutating", "p1"), func() {
 	var (
 		target       int
+		floor        int
 		rampBatch    int
 		increments   []int
 		resultsDir   string
@@ -67,6 +70,7 @@ var _ = Describe("Steady-state provisioning benchmark", Ordered, Label("perf-ste
 	// Parsed at tree-build time (not in BeforeAll) so the P2 spec count is
 	// known when the specs are registered.
 	target = ssEnvInt("PERF_SS_TARGET", 350)
+	floor = ssEnvInt("PERF_SS_FLOOR", 2)
 	rampBatch = ssEnvInt("PERF_SS_RAMP_BATCH", 10)
 	resultsDir = os.Getenv("PERF_SS_RESULTS_DIR")
 	if resultsDir == "" {
@@ -76,8 +80,8 @@ var _ = Describe("Steady-state provisioning benchmark", Ordered, Label("perf-ste
 
 	BeforeAll(func() {
 		steadySeenMacs = map[string]bool{}
-		GinkgoWriter.Printf("steady-state benchmark: target=%d rampBatch=%d increments=%v resultsDir=%s\n",
-			target, rampBatch, increments, resultsDir)
+		GinkgoWriter.Printf("steady-state benchmark: target=%d floor=%d rampBatch=%d increments=%v resultsDir=%s\n",
+			target, floor, rampBatch, increments, resultsDir)
 	})
 
 	AfterAll(NodeTimeout(90*time.Minute), func(ctx SpecContext) {
@@ -106,20 +110,33 @@ var _ = Describe("Steady-state provisioning benchmark", Ordered, Label("perf-ste
 		Expect(workerSets).NotTo(BeEmpty(), "no worker MachineSets found")
 
 		originals = map[string]int{}
+		rampMS := workerSets[0].Name
 		for _, s := range workerSets {
 			reps := 0
 			if s.Spec.Replicas != nil {
 				reps = int(*s.Spec.Replicas)
 			}
 			originals[s.Name] = reps
-			if reps > 0 {
-				GinkgoWriter.Printf("scaling machineset %s %d -> 0\n", s.Name, reps)
-				Expect(framework.ScaleMachineSet(ctx, clients.Machine, s.Name, 0)).To(Succeed())
+			// The ramp MachineSet keeps PERF_SS_FLOOR workers; every other set
+			// drains to 0.
+			keep := 0
+			if s.Name == rampMS {
+				keep = floor
+			}
+			switch {
+			case reps > keep:
+				GinkgoWriter.Printf("scaling machineset %s %d -> %d\n", s.Name, reps, keep)
+				Expect(framework.ScaleMachineSet(ctx, clients.Machine, s.Name, int32(keep))).To(Succeed())
+			case reps < keep:
+				GinkgoWriter.Printf("scaling machineset %s %d -> %d (floor bootstrap)\n", s.Name, reps, keep)
+				Expect(framework.ScaleMachineSet(ctx, clients.Machine, s.Name, int32(keep))).To(Succeed())
+				Expect(waitMachineSetRunning(ctx, s.Name, keep, perfSSMachineStepTimeout)).To(Succeed(),
+					"floor machines of %s must be Running", s.Name)
 			}
 		}
 		for _, s := range workerSets {
-			if originals[s.Name] == 0 {
-				continue
+			if s.Name == rampMS || originals[s.Name] == 0 {
+				continue // ramp set keeps its floor machines
 			}
 			Expect(drainMachineSet(ctx, s.Name)).To(Succeed(), "worker machineset %s must drain", s.Name)
 		}
@@ -133,16 +150,25 @@ var _ = Describe("Steady-state provisioning benchmark", Ordered, Label("perf-ste
 			}
 		}
 
-		steadyRampMS = workerSets[0].Name
+		steadyRampMS = rampMS
+		// Pre-seed steady state so P1 counts only machines created after the drain.
+		machines, err := clients.Machine.MachineV1beta1().Machines(framework.MachineAPINamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: "machine.openshift.io/cluster-api-machineset=" + rampMS,
+		})
+		Expect(err).NotTo(HaveOccurred())
+		for _, m := range machines.Items {
+			steadySeenMacs[m.Name] = true
+		}
+		steadyCurrent = floor
 		Expect(framework.WaitForAllNodesReady(ctx, clients.Kube, perfSSDrainTimeout)).To(Succeed(),
 			"cluster must settle (all remaining nodes Ready) before the ramp")
 		runStart = time.Now()
 		Expect(os.MkdirAll(resultsDir, 0o755)).To(Succeed())
-		GinkgoWriter.Printf("cluster drained; ramp machine set: %s (originals: %v)\n", steadyRampMS, originals)
+		GinkgoWriter.Printf("cluster drained to floor=%d; ramp machine set: %s (originals: %v)\n", floor, steadyRampMS, originals)
 	})
 
 	It("P1: should ramp to target in batches with full convergence", func(ctx SpecContext) {
-		replicas := 0
+		replicas := floor
 		for i := 1; replicas < target; i++ {
 			replicas += rampBatch
 			if replicas > target {
@@ -223,6 +249,26 @@ func ssEnvIntList(name, def string) []int {
 		}
 	}
 	return out
+}
+
+// waitMachineSetRunning polls until `expect` machines of the set are Running.
+func waitMachineSetRunning(ctx SpecContext, msName string, expect int, timeout time.Duration) error {
+	return wait.PollUntilContextTimeout(ctx, 15*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		machines, err := clients.Machine.MachineV1beta1().Machines(framework.MachineAPINamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: "machine.openshift.io/cluster-api-machineset=" + msName,
+		})
+		if err != nil {
+			return false, nil
+		}
+		running := 0
+		for _, m := range machines.Items {
+			if m.Status.Phase != nil && *m.Status.Phase == "Running" {
+				running++
+			}
+		}
+		GinkgoWriter.Printf("floor-wait: %d/%d machines Running for %s\n", running, expect, msName)
+		return running >= expect, nil
+	})
 }
 
 // drainMachineSet waits for a MachineSet to drain, force-deleting machines
@@ -445,8 +491,8 @@ func printStepSummary(res steadyStepResult) {
 
 func printSteadySummary(doc steadyStateDoc, logDir string) {
 	GinkgoWriter.Printf("\n=== steady-state benchmark complete ===\n")
-	GinkgoWriter.Printf("cluster target:   %d nodes (ramp %d in batches of %d)\n",
-		doc.ClusterTarget, len(doc.Ramp), doc.RampBatch)
+	GinkgoWriter.Printf("cluster target:   %d nodes (ramp in batches of %d, starting from floor)\n",
+		doc.ClusterTarget, doc.RampBatch)
 	GinkgoWriter.Printf("total run:        %s (started %s)\n",
 		fmtDuration(doc.EndTime.Sub(doc.StartTime)), doc.StartTime.Format(time.RFC3339))
 	GinkgoWriter.Printf("\n--- ramp steps ---\n")
